@@ -1,0 +1,3 @@
+def metodo_serfes(nivel_array):
+    ...
+    return nivel_medio

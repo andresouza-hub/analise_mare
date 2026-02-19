@@ -1,232 +1,256 @@
+# src/core/orquestrador_b.py
 from __future__ import annotations
 
-import os
-import math
+import re
+from pathlib import Path
+from typing import Optional, Dict, Any, List, Callable
+
 import pandas as pd
 
-# I/O
-import src.io.leitura_pocos as leitura_pocos
-from src.io.leitura_mare import ler_mare_eventos
-from src.io.leitura_cotas import ler_cotas
-from src.io.leitura_kmz import ler_kmz_pocos
 
-# Core científico
-from src.core.analise_poco import analisar_poco
-
-# Gradiente 2D
-from src.core.gradiente_2d import (
-    calcular_gradiente_2d_horario,
-    detectar_inversao_gradiente,
-)
-
-
-def _nome_poco_do_caminho(caminho: str) -> str:
-    base = os.path.basename(caminho)
-    return os.path.splitext(base)[0].strip()
+# =========================
+# Import helpers (robusto)
+# =========================
+def _import_first(candidates: list[tuple[str, str]]) -> Callable:
+    last_err = None
+    for mod, fn in candidates:
+        try:
+            m = __import__(mod, fromlist=[fn])
+            return getattr(m, fn)
+        except Exception as e:
+            last_err = e
+    raise ImportError(f"Não consegui importar nenhuma opção: {candidates}. Último erro: {last_err}")
 
 
-def _resolver_funcao_leitura_poco():
-    candidatos = [
-        "ler_pocos_agregar_hora",      # seu nome atual
-        "ler_poco_e_agregar_hora",
-        "ler_poco_agregar_hora",
-        "ler_poco_horario",
-    ]
-    for nome in candidatos:
-        fn = getattr(leitura_pocos, nome, None)
-        if callable(fn):
-            return fn, nome
+# ---- Leitura poços (tenta variações de módulo e nome da função)
+ler_poco_e_agregar_hora = _import_first([
+    ("src.io.leitura_pocos", "ler_poco_e_agregar_hora"),
+    ("src.io.leitura_pocos", "ler_pocos_e_agregar_hora"),
+    ("src.core.leitura_pocos", "ler_poco_e_agregar_hora"),
+    ("src.core.leitura_pocos", "ler_pocos_e_agregar_hora"),
+])
 
-    disponiveis = [n for n in dir(leitura_pocos) if not n.startswith("_")]
-    raise ImportError(
-        "Não encontrei no src/io/leitura_pocos.py uma função de leitura/agregação horária.\n"
-        f"Nomes tentados: {', '.join(candidatos)}\n"
-        f"Disponíveis no módulo: {disponiveis}\n"
-        "Ação: abra src/io/leitura_pocos.py e confirme o nome da função pública."
-    )
+# ---- Leitura maré
+ler_mare_csv_eventos = _import_first([
+    ("src.io.leitura_mare", "ler_mare_csv_eventos"),
+    ("src.core.leitura_mare", "ler_mare_csv_eventos"),
+])
+
+# ---- Classificação alta/baixa
+classificar_eventos_mare_alta_baixa = _import_first([
+    ("src.core.mare_lag", "classificar_eventos_mare_alta_baixa"),
+    ("src.core.marelag", "classificar_eventos_mare_alta_baixa"),
+])
+
+# ---- Núcleo análise por poço
+analisar_poco = _import_first([
+    ("src.core.analise_poco", "analisar_poco"),
+    ("src.core.analisepoco", "analisar_poco"),
+])
+
+# ---- Cotas e KMZ (I/O)
+ler_cotas = _import_first([
+    ("src.io.leitura_cotas", "ler_cotas"),
+    ("src.core.leitura_cotas", "ler_cotas"),
+])
+
+ler_kmz_pocos = _import_first([
+    ("src.io.leitura_kmz", "ler_kmz_pocos"),
+    ("src.core.leitura_kmz", "ler_kmz_pocos"),
+])
+
+# ---- Gradiente 2D (cálculo)
+montar_head_long = _import_first([
+    ("src.core.analise_gradiente", "montar_head_long"),
+    ("src.core.gradiente", "montar_head_long"),
+])
+calcular_vetores_horarios = _import_first([
+    ("src.core.analise_gradiente", "calcular_vetores_horarios"),
+    ("src.core.gradiente", "calcular_vetores_horarios"),
+])
+resumir_gradiente_por_janelas = _import_first([
+    ("src.core.analise_gradiente", "resumir_gradiente_por_janelas"),
+    ("src.core.gradiente", "resumir_gradiente_por_janelas"),
+])
 
 
-def _pegar_serfes_medio(df_res: pd.DataFrame) -> float:
-    """
-    Extrai o nível Serfes médio do dataframe do poço.
-
-    Regra:
-      - tenta achar a linha 'MÉDIA' (se existir)
-      - senão, usa a média numérica da coluna
-    """
-    col = "Nível médio (Serfes) (m)"
-    if col not in df_res.columns:
-        raise KeyError(f"Coluna '{col}' não existe no resultado do poço.")
-
-    # tenta linha média
-    if "Janela" in df_res.columns:
-        mask = df_res["Janela"].astype(str).str.upper().eq("MÉDIA")
-        if mask.any():
-            v = pd.to_numeric(df_res.loc[mask, col], errors="coerce").iloc[0]
-            if pd.notna(v):
-                return float(v)
-
-    v = pd.to_numeric(df_res[col], errors="coerce").mean()
-    return float(v)
+def _norm_poco(s: str) -> str:
+    s = str(s).strip().upper()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
-def _gradiente_2d_por_serfes(resultados_por_poco: dict[str, pd.DataFrame],
-                            df_cotas: pd.DataFrame,
-                            df_xy: pd.DataFrame):
-    """
-    Calcula 1 vetor 2D "médio" usando:
-      Head_serfes = Cota_TOC_m - Serfes_medio
-
-    Ajusta plano Head = aX + bY + c; fluxo = (-a, -b).
-    Retorna dicionário com módulo e ângulo.
-    """
-    df_c = df_cotas.copy()
-    df_xy2 = df_xy.copy()
-    df_c["Poco"] = df_c["Poco"].astype(str).str.strip()
-    df_xy2["Poco"] = df_xy2["Poco"].astype(str).str.strip()
-
-    cotas = dict(zip(df_c["Poco"], df_c["Cota_TOC_m"]))
-
-    rows = []
-    for poco, df_res in resultados_por_poco.items():
-        if poco not in cotas:
-            continue
-        if poco not in df_xy2["Poco"].values:
-            continue
-        serfes_med = _pegar_serfes_medio(df_res)
-        head = float(cotas[poco]) - float(serfes_med)
-        xy = df_xy2[df_xy2["Poco"] == poco].iloc[0]
-        rows.append({"Poco": poco, "Head": head, "X_m": float(xy["X_m"]), "Y_m": float(xy["Y_m"])})
-
-    if len(rows) < 3:
-        return {"status": "INSUFICIENTE", "motivo": "Precisa >=3 poços com cota+xy+serfes."}
-
-    dfh = pd.DataFrame(rows)
-    X = dfh["X_m"].to_numpy(float)
-    Y = dfh["Y_m"].to_numpy(float)
-    H = dfh["Head"].to_numpy(float)
-
-    A = pd.DataFrame({"X": X, "Y": Y, "1": 1.0}).to_numpy()
-    coef, _, _, _ = pd.np.linalg.lstsq(A, H, rcond=None)  # compatível
-    a, b, c = float(coef[0]), float(coef[1]), float(coef[2])
-
-    vx, vy = -a, -b
-    ang = math.degrees(math.atan2(vy, vx))
-    if ang < 0:
-        ang += 360.0
-    mod = math.sqrt(a*a + b*b)
-
-    return {
-        "status": "OK",
-        "n_pocos": int(len(dfh)),
-        "dH_dx (a)": a,
-        "dH_dy (b)": b,
-        "modulo_gradiente": mod,
-        "angulo_fluxo_deg": float(ang),
-        "tabela_head_serfes": dfh
-    }
+def _nome_poco_do_caminho(caminho: str | Path) -> str:
+    p = Path(caminho)
+    return _norm_poco(p.stem)
 
 
 def executar_analise_b(
-    caminhos_pocos: list[str],
-    inicio_por_poco: dict[str, pd.Timestamp],
-    caminho_mare: str | None = None,
-    caminho_cotas: str | None = None,
-    caminho_kmz: str | None = None,
-):
+    *,
+    caminhos_pocos: List[str],
+    inicios_por_poco: Dict[str, pd.Timestamp],
+    caminho_mare: Optional[str] = None,
+    caminho_cotas: Optional[str] = None,
+    caminho_kmz: Optional[str] = None,
+) -> Dict[str, Any]:
+
     if not caminhos_pocos:
-        raise ValueError("caminhos_pocos está vazio. Selecione 1 ou mais arquivos de poço.")
+        raise ValueError("Nenhum caminho de poço informado em 'caminhos_pocos'.")
 
-    ler_poco_hora, nome_func_leitura = _resolver_funcao_leitura_poco()
-
-    # MARÉ (opcional)
+    # ---- Maré (se houver)
     df_mare = None
+    df_mare_tipo = None
     if caminho_mare:
-        df_mare = ler_mare_eventos(caminho_mare)
+        df_mare = ler_mare_csv_eventos(caminho_mare)
+        try:
+            df_mare_tipo = classificar_eventos_mare_alta_baixa(df_mare)
+        except Exception:
+            df_mare_tipo = None
 
-    # PROCESSAMENTO POÇO A POÇO
-    resultados_por_poco: dict[str, pd.DataFrame] = {}
-    lista_consolidado: list[pd.DataFrame] = []
-    series_horarias_por_poco: dict[str, pd.DataFrame] = {}
+    # ---- Normaliza inícios
+    inicios_norm = {_norm_poco(k): pd.to_datetime(v) for k, v in inicios_por_poco.items()}
 
-    inicio_por_poco_norm = {str(k).strip(): v for k, v in inicio_por_poco.items()}
+    porpoco: Dict[str, pd.DataFrame] = {}
+    janelas_list: List[pd.DataFrame] = []
+    series_horarias: Dict[str, pd.DataFrame] = {}
+
+    processados = 0
+    pulados = 0
+    pulados_por_motivo: Dict[str, str] = {}
 
     for caminho in caminhos_pocos:
-        poco = _nome_poco_do_caminho(caminho)
+        poco_id = _nome_poco_do_caminho(caminho)
 
-        if poco not in inicio_por_poco_norm:
-            chaves = sorted(list(inicio_por_poco_norm.keys()))
-            raise ValueError(
-                f"Início não definido para o poço '{poco}'.\n"
-                "A chave do dicionário inicio_por_poco deve ser exatamente o nome do arquivo sem extensão.\n"
-                f"Chaves recebidas: {chaves}"
-            )
+        if poco_id not in inicios_norm:
+            pulados += 1
+            pulados_por_motivo[poco_id] = "Início do teste não informado."
+            continue
 
-        inicio = inicio_por_poco_norm[poco]
+        inicio = inicios_norm[poco_id]
 
-        df_h = ler_poco_hora(caminho, inicio)
+        # ---- Série horária do poço
+        try:
+            df_h = ler_poco_e_agregar_hora(caminho, inicio)
+        except Exception as e:
+            pulados += 1
+            pulados_por_motivo[poco_id] = f"Falha na leitura/agregação: {e}"
+            continue
 
-        df_res = analisar_poco(
-            df_h=df_h,
+        if len(df_h) < 71:
+            pulados += 1
+            pulados_por_motivo[poco_id] = "Menos de 71 horas após o início."
+            continue
+
+        series_horarias[poco_id] = df_h
+
+        # ---- Análise por poço
+        out = analisar_poco(
+            df_poco_h=df_h,
+            nome_poco=poco_id,
+            inicio_teste=inicio,
             df_mare=df_mare,
-            nome_poco=poco
+            df_mare_tipo=df_mare_tipo,
         )
 
-        resultados_por_poco[poco] = df_res
-        lista_consolidado.append(df_res)
-        series_horarias_por_poco[poco] = df_h
+        df_janelas = out["janelas"]
+        porpoco[poco_id] = df_janelas
+        janelas_list.append(df_janelas)
+        processados += 1
 
-    df_consolidado = pd.concat(lista_consolidado, ignore_index=True)
+    df_consolidado = pd.concat(janelas_list, ignore_index=True) if janelas_list else pd.DataFrame()
 
-    # INSUMOS GRADIENTE (opcional)
-    insumos_gradiente = None
-    gradiente_2d = None
-
+    # ---- Status de insumos de gradiente
     if caminho_cotas or caminho_kmz:
         if not (caminho_cotas and caminho_kmz):
             insumos_gradiente = {
                 "status": "INCOMPLETO",
-                "motivo": "Para gradiente 2D é necessário fornecer caminho_cotas E caminho_kmz.",
-                "caminho_cotas": bool(caminho_cotas),
-                "caminho_kmz": bool(caminho_kmz),
+                "motivo": "Para gradiente 2D forneça 'caminho_cotas' e 'caminho_kmz'.",
+                "caminho_cotas_recebido": bool(caminho_cotas),
+                "caminho_kmz_recebido": bool(caminho_kmz),
             }
         else:
-            df_cotas = ler_cotas(caminho_cotas)      # Poco, Cota_TOC_m
-            df_xy = ler_kmz_pocos(caminho_kmz)       # Poco, X_m, Y_m
-
             insumos_gradiente = {
                 "status": "OK",
-                "cotas": df_cotas,
-                "coords_xy": df_xy,
-                "pocos_com_serie": sorted(list(series_horarias_por_poco.keys())),
+                "caminho_cotas": str(caminho_cotas),
+                "caminho_kmz": str(caminho_kmz),
             }
+    else:
+        insumos_gradiente = None
 
-            # ---- GRADIENTE 2D: HORÁRIO + INVERSÃO
-            df_grad_h = calcular_gradiente_2d_horario(
-                series_horarias_por_poco=series_horarias_por_poco,
-                df_cotas=df_cotas,
-                df_xy=df_xy,
-                min_pocos=3,
+    # ---- Gradiente 2D
+    gradiente2d = None
+    if insumos_gradiente and insumos_gradiente.get("status") == "OK":
+        try:
+            df_cotas = ler_cotas(caminho_cotas)  # Poco, Cota_TOC_m
+            df_xy = ler_kmz_pocos(caminho_kmz)   # Poco, X_m, Y_m
+
+            df_cotas = df_cotas.copy()
+            df_xy = df_xy.copy()
+            df_cotas["Poco"] = df_cotas["Poco"].apply(_norm_poco)
+            df_xy["Poco"] = df_xy["Poco"].apply(_norm_poco)
+
+            cotas_por_poco = dict(zip(df_cotas["Poco"], df_cotas["Cota_TOC_m"]))
+
+            pocos_series = set(series_horarias.keys())
+            pocos_cota = set(df_cotas["Poco"].tolist())
+            pocos_xy = set(df_xy["Poco"].tolist())
+
+            inter = sorted(list(pocos_series & pocos_cota & pocos_xy))
+            faltam_cota = sorted(list(pocos_series - pocos_cota))
+            faltam_xy = sorted(list(pocos_series - pocos_xy))
+
+            df_head_long = montar_head_long(series_horarias, cotas_por_poco)
+            df_vetores = calcular_vetores_horarios(df_head_long, df_xy, min_pocos=3)
+
+            df_janelas_grad = resumir_gradiente_por_janelas(
+                df_vetores,
+                janela_h=71,
+                passo_h=24,
+                limiar_deg=160.0,
+                consec_h=2,
+                min_vetores_na_janela=60,
             )
-            inv = detectar_inversao_gradiente(df_grad_h, limiar_deg=160.0, horas_consecutivas=2)
 
-            # ---- GRADIENTE MÉDIO: SERFES (1 vetor)
-            serfes_grad = _gradiente_2d_por_serfes(resultados_por_poco, df_cotas, df_xy)
-
-            gradiente_2d = {
-                "horario": df_grad_h,
-                "inversao": inv,
-                "serfes": serfes_grad,
+            gradiente2d = {
+                "status": "OK",
+                "meta": {
+                    "pocos_com_series": len(pocos_series),
+                    "pocos_com_cota": len(pocos_cota),
+                    "pocos_com_xy": len(pocos_xy),
+                    "pocos_intersecao": len(inter),
+                    "pocos_intersecao_lista": inter,
+                    "pocos_sem_cota": faltam_cota,
+                    "pocos_sem_xy": faltam_xy,
+                    "n_heads": int(len(df_head_long)),
+                    "n_vetores_horarios": int(len(df_vetores)),
+                    "n_janelas_grad": int(len(df_janelas_grad)) if isinstance(df_janelas_grad, pd.DataFrame) else 0,
+                },
+                "vetores_horarios": df_vetores,
+                "janelas": df_janelas_grad,
+                # para plotar o mapa no app (como no Colab)
+                "pocos_xy": df_xy[df_xy["Poco"].isin(inter)].reset_index(drop=True),
             }
+
+        except Exception as e:
+            gradiente2d = {"status": "ERRO", "erro": str(e)}
+
+    meta = {
+        "processados": int(processados),
+        "pulados": int(pulados),
+        "motivos_pulados": pulados_por_motivo,
+        "tem_mare": df_mare is not None,
+        "tem_insumos_gradiente": insumos_gradiente is not None,
+        "gradiente2d_calculado": isinstance(gradiente2d, dict) and gradiente2d.get("status") == "OK",
+    }
 
     return {
-        "meta": {
-            "leitura_pocos_usou": nome_func_leitura,
-            "tem_mare": df_mare is not None,
-            "tem_insumos_gradiente": insumos_gradiente is not None,
-        },
-        "por_poco": resultados_por_poco,
+        "meta": meta,
+        "porpoco": porpoco,
         "consolidado": df_consolidado,
         "insumos_gradiente": insumos_gradiente,
-        "gradiente_2d": gradiente_2d,
+        "gradiente2d": gradiente2d,
+        # essenciais para os gráficos do Colab no Streamlit
+        "series_horarias": series_horarias,
+        "mare_eventos": df_mare,          # colunas: datetime, maré
+        "mare_eventos_tipo": df_mare_tipo # opcional
     }

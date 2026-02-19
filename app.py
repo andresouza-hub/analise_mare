@@ -17,7 +17,9 @@ from src.core.orquestrador_b import executar_analise_b
 # Configuração da página
 # =============================================================================
 st.set_page_config(page_title="Agente GAC", layout="wide")
+
 st.title("🛠️ Agente GAC – Serfes + Amplitudes + FFT + Maré/Lag + Gradiente 2D + PIG (sizígia×quadratura)")
+st.caption("Desenvolvido por: André Souza")
 
 # 🎛️ Tamanhos dos gráficos (mantidos)
 FIG_TS = (6.0, 2.0)        # Série temporal

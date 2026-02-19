@@ -1,8 +1,9 @@
+streamlit==1.29.0
+altair==4.2.2
 pandas
 numpy
 matplotlib
-seaborn
 scipy
+seaborn
 openpyxl
 pyproj
-streamlit

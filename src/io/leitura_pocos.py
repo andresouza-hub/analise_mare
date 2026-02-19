@@ -1,99 +1,78 @@
-# =========================================================
-# LEITURA DE POÇOS (LEVELLOGGER)
-# =========================================================
-# - Lê múltiplos CSVs de poços
-# - Padroniza dados
-# - Agrega nível por hora
-# - NÃO faz cálculo científico
-# =========================================================
-
+# src/io/leitura_pocos.py
 from __future__ import annotations
 
-import os
 import pandas as pd
+import numpy as np
 
 
-def _normalizar_nome_poco(caminho: str) -> str:
+def _ler_csv_levellogger(caminho_csv: str) -> pd.DataFrame:
     """
-    Extrai o nome do poço a partir do nome do arquivo.
-    Ex: 'PM-285-776.csv' -> 'PM-285-776'
+    Lê o CSV do Level Logger com o padrão típico:
+      - skiprows=11, sep=';', encoding='latin1'
     """
-    return os.path.splitext(os.path.basename(caminho))[0]
+    df = pd.read_csv(caminho_csv, skiprows=11, sep=';', encoding='latin1')
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
-def _ler_csv_levelogger(caminho_csv: str) -> pd.DataFrame:
+def _achar_coluna(df: pd.DataFrame, nomes_possiveis: list[str]) -> str | None:
+    cols = list(df.columns)
+    low = {c.lower(): c for c in cols}
+    for n in nomes_possiveis:
+        if n.lower() in low:
+            return low[n.lower()]
+    return None
+
+
+def ler_pocos_e_agregar_hora(caminho_csv: str, inicio: pd.Timestamp) -> pd.DataFrame:
     """
-    Lê um CSV de Levelogger no formato padrão.
+    Lê Level Logger e agrega por hora (média), mantendo a lógica do Colab:
+      - Date e Time em colunas separadas (ou 1ª e 2ª colunas como fallback)
+      - Nível: tenta por nome; se não encontrar, usa a 4ª coluna (índice 3) como fallback
+
+    Retorna df_h com colunas: ['hora', 'Nivel']
     """
-    df = pd.read_csv(
-        caminho_csv,
-        sep=';',
-        skiprows=11,
-        encoding='latin1'
-    )
+    df = _ler_csv_levellogger(caminho_csv)
 
-    # Renomeia colunas por posição (padrão Levelogger)
-    df = df.rename(columns={
-        df.columns[0]: 'Data',
-        df.columns[1]: 'Hora',
-        df.columns[3]: 'Nivel'
-    })
+    # Date e Time
+    col_date = _achar_coluna(df, ["Date", "Data"])
+    col_time = _achar_coluna(df, ["Time", "Hora"])
+    if col_date is None or col_time is None:
+        if len(df.columns) < 2:
+            raise ValueError(f"CSV inválido: poucas colunas. Colunas: {list(df.columns)}")
+        col_date = df.columns[0]
+        col_time = df.columns[1]
 
-    # Cria datetime
-    df['datetime'] = pd.to_datetime(
-        df['Data'].astype(str) + ' ' + df['Hora'].astype(str),
+    # Nível
+    col_nivel = _achar_coluna(df, ["Nivel", "Nível", "Level", "Water Level"])
+    if col_nivel is None:
+        if len(df.columns) <= 3:
+            raise ValueError(
+                f"CSV inválido: não achei coluna de nível e não existe coluna 4. "
+                f"Colunas: {list(df.columns)}"
+            )
+        col_nivel = df.columns[3]
+
+    # Parse
+    dt = pd.to_datetime(
+        df[col_date].astype(str).str.strip() + " " + df[col_time].astype(str).str.strip(),
         dayfirst=True,
-        errors='coerce'
+        errors="coerce",
     )
+    nivel = pd.to_numeric(df[col_nivel].astype(str).str.replace(",", "."), errors="coerce")
 
-    # Converte nível para float
-    df['Nivel'] = (
-        df['Nivel']
-        .astype(str)
-        .str.replace(',', '.', regex=False)
-        .astype(float)
-    )
+    out = pd.DataFrame({"datetime": dt, "Nivel": nivel}).dropna(subset=["datetime", "Nivel"]).copy()
+    if inicio is not None:
+        inicio = pd.to_datetime(inicio)
+        out = out[out["datetime"] >= inicio].copy()
 
-    df = df.dropna(subset=['datetime', 'Nivel']).copy()
-
-    return df[['datetime', 'Nivel']]
-
-
-def _agregar_por_hora(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agrega o nível por hora (média).
-    """
-    df['hora'] = df['datetime'].dt.floor('h')
-    df_h = (
-        df
-        .groupby('hora', as_index=False)['Nivel']
-        .mean()
-        .sort_values('hora')
-        .reset_index(drop=True)
-    )
+    out["hora"] = out["datetime"].dt.floor("h")
+    df_h = out.groupby("hora")["Nivel"].mean().reset_index()
     return df_h
 
 
-def ler_pocos_e_agregar_hora(caminhos_csv: list[str]) -> dict[str, pd.DataFrame]:
-    """
-    Lê múltiplos arquivos de poços e retorna um dicionário:
-
-    {
-        'PM-285-776': df_h,
-        'PM-285-781': df_h,
-        ...
-    }
-    """
-    resultados: dict[str, pd.DataFrame] = {}
-
-    for caminho in caminhos_csv:
-        nome_poco = _normalizar_nome_poco(caminho)
-        df_raw = _ler_csv_levelogger(caminho)
-        df_h = _agregar_por_hora(df_raw)
-
-        if df_h.empty:
-            raise ValueError(f'Poço {nome_poco} não possui dados válidos.')
-
-        resultados[nome_poco] = df_h
-
-    return resultados
+# Aliases (compatibilidade com variações de import)
+ler_poco_e_agregar_hora = ler_pocos_e_agregar_hora
+ler_pocos_agregar_hora = ler_pocos_e_agregar_hora
+ler_poco_agregar_hora = ler_pocos_e_agregar_hora
+ler_poco_horario = ler_pocos_e_agregar_hora

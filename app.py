@@ -19,7 +19,13 @@ from src.core.orquestrador_b import executar_analise_b
 st.set_page_config(page_title="GAC Tidal Insight", layout="wide")
 
 st.title("🌊 GAC Tidal Insight")
-st.caption("**Desenvolvido por André Souza**")
+st.markdown(
+    "<div style='font-size:20px; font-weight:600;'>André Souza</div>",
+    unsafe_allow_html=True
+)
+
+st.markdown("*Especialista em Dinâmica Hidráulica e GAC*")
+
 st.markdown(
     """
     Plataforma analítica para avaliação integrada da dinâmica hidráulica de aquíferos rasos costeiros,

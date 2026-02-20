@@ -24,7 +24,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.markdown("*Especialista em Dinâmica Hidráulica e GAC*")
+st.markdown("*Especialista em Gerenciamento de Áreas Contaminadas (GAC)*")
 
 st.markdown(
     """

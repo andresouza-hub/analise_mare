@@ -16,10 +16,25 @@ from src.core.orquestrador_b import executar_analise_b
 # =============================================================================
 # Configuração da página
 # =============================================================================
-st.set_page_config(page_title="Agente GAC", layout="wide")
+st.set_page_config(page_title="GAC Tidal Insight", layout="wide")
 
-st.title("🛠️ Agente GAC – Serfes + Amplitudes + FFT + Maré/Lag + Gradiente 2D + PIG (sizígia×quadratura)")
-st.caption("Desenvolvido por: André Souza")
+st.title("🌊 GAC Tidal Insight")
+st.caption("**Desenvolvido por André Souza**")
+st.markdown(
+    """
+    Plataforma analítica para avaliação integrada da dinâmica hidráulica de aquíferos rasos costeiros,
+    incorporando estimativa de nível médio pelo método de Serfes (1991),
+    análise de amplitudes hidráulicas, decomposição espectral harmônica (FFT),
+    defasagem maré–poço (lag), gradiente hidráulico bidimensional
+    e modulação quinzenal (sizígia × quadratura).
+
+    O sistema permite quantificar conectividade hidráulica,
+    resposta do aquífero às variações de maré,
+    estabilidade direcional e inversões do fluxo subterrâneo,
+    além de variabilidade espectral em múltiplas escalas temporais,
+    apoiando interpretações hidrogeológicas e a tomada de decisão em GAC.
+    """
+)
 
 # 🎛️ Tamanhos dos gráficos (mantidos)
 FIG_TS = (6.0, 2.0)        # Série temporal

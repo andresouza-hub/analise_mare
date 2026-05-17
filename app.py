@@ -533,7 +533,7 @@ def create_altair_bar_chart(df, x_col, y_col, title, color='#1E88E5'):
 # =============================================================================
 
 def interpretar_resultados_avancado(resultado: dict, df_pig: Optional[pd.DataFrame] = None) -> str:
-    """Gera interpretação técnica consolidada."""
+    """Gera interpretação técnica consolidada cruzando R, lag, FFT, IMQ e gradiente."""
     meta = resultado.get("meta", {})
     df_con = resultado.get("consolidado")
     grad = resultado.get("gradiente2d")
@@ -591,10 +591,26 @@ def interpretar_resultados_avancado(resultado: dict, df_pig: Optional[pd.DataFra
             else:
                 lag_txt = "resposta muito lenta (>12 h)"
 
+            # Índice R (se disponível em df_pig)
+            r_txt = "—"
+            if df_pig is not None and not df_pig.empty:
+                rp = df_pig[(df_pig["Poco"] == poco) & df_pig["R_indice"].notna()]["R_indice"].mean()
+                if pd.notna(rp):
+                    if rp > 0.6:
+                        r_txt = f"R={rp:.2f} (influência forte)"
+                    elif rp >= 0.3:
+                        r_txt = f"R={rp:.2f} (influência moderada)"
+                    elif rp >= 0.05:
+                        r_txt = f"R={rp:.2f} (resposta amortecida)"
+                    else:
+                        r_txt = f"R≈0 (desacoplado)"
+
             linhas.append(f"**Poço {poco}**")
             linhas.append(f"- Amplitude p2p: **{amp_med:.3f} m** | RMS: **{rms_med:.3f} m**")
             linhas.append(f"- Dominância: **{dom_txt}** | Lag: **{lag_txt}**")
+            linhas.append(f"- Índice de resposta à maré: {r_txt}")
 
+    # Gradiente 2D
     if isinstance(grad, dict) and grad.get("status") == "OK":
         df_jg = grad.get("janelas")
         if isinstance(df_jg, pd.DataFrame) and not df_jg.empty:
@@ -603,37 +619,269 @@ def interpretar_resultados_avancado(resultado: dict, df_pig: Optional[pd.DataFra
             linhas.append("")
             linhas.append("### 3. Gradiente Hidráulico 2D")
             linhas.append(f"- Direção: **{ang:.1f}° ({_cardinal_16(ang)})** | Módulo: **{mod:.4f} m/m**")
+            inv_cols = [c for c in df_jg.columns if str(c).startswith("Inversão (")]
+            if inv_cols:
+                col_inv = inv_cols[0]
+                inv_pct = float(100.0 * (df_jg[col_inv].astype(str).str.upper() == "SIM").mean())
+                linhas.append(f"- Inversões nas janelas: **{inv_pct:.1f}%**")
 
+    # Modulação quinzenal
     if df_pig is not None and not df_pig.empty:
+        linhas.append("")
+        linhas.append("### 4. Modulação Quinzenal (sizígia × quadratura)")
         imq_vals = []
         for poco, g in df_pig.groupby("Poco"):
             a_s = g.loc[g["Regime"] == "SIZIGIA", "Amp_p2p_m"].mean()
             a_q = g.loc[g["Regime"] == "QUADRATURA", "Amp_p2p_m"].mean()
             if pd.notna(a_s) and pd.notna(a_q) and a_q > 0:
                 imq_vals.append(a_s / a_q)
-
         if imq_vals:
-            linhas.append("")
-            linhas.append("### 4. Modulação Quinzenal (IMQ)")
-            linhas.append(f"- IMQ médio: **{np.nanmean(imq_vals):.2f}** (sizígia/quadratura)")
+            linhas.append(f"- IMQ médio (Amp_sizígia/Amp_quadratura): **{np.nanmean(imq_vals):.2f}**")
+
+        dom_list = []
+        for poco, g in df_pig.groupby("Poco"):
+            r12 = g["RSS_12h_m"].mean()
+            r24 = g["RSS_24h_m"].mean()
+            if pd.notna(r12) and pd.notna(r24):
+                if r12 > r24:
+                    dom_list.append("12h")
+                elif r24 > r12:
+                    dom_list.append("24h")
+                else:
+                    dom_list.append("mista")
+        if dom_list:
+            frac_12 = 100.0 * dom_list.count("12h") / len(dom_list)
+            linhas.append(f"- Dominância espectral: **{frac_12:.0f}%** dos poços com banda ~12 h dominante")
+
+    # Conclusão técnica consolidada
+    linhas.append("")
+    linhas.append("### 5. Conclusão Técnica Consolidada")
+    linhas.append(
+        "A resposta hidráulica mostra coerência com o forçamento periódico (maré) quando presente, "
+        "com variação de lag e dominância espectral indicativas da assinatura local do aquífero. "
+        "Valores elevados de R e IMQ sugerem forte conectividade hidráulica com o sistema marinho; "
+        "inversões frequentes do gradiente indicam dinâmica de fluxo bidirecional sob influência mareal."
+    )
 
     return "\n".join(linhas)
 
 
-def analise_pig_quinzenal(resultado: dict) -> tuple:
-    """Análise PIG quinzenal (simplificada para compatibilidade)."""
+# =============================================================================
+# Funções auxiliares para análise lunar (sizígia × quadratura)
+# =============================================================================
+SINODICO_DIAS = 29.53058867
+LUA_REF = pd.Timestamp("2000-01-06 18:14:00", tz=None)
+
+
+def calcular_idade_lunar(idx) -> pd.Series:
+    """Calcula idade lunar (dias desde a última lua nova) usando mês sinódico."""
+    if isinstance(idx, pd.DatetimeIndex):
+        s = pd.Series(idx, index=idx)
+    else:
+        s = pd.to_datetime(pd.Series(idx))
+    delta = (s - LUA_REF).dt.total_seconds() / 86400.0
+    idade = delta.mod(SINODICO_DIAS)
+    return idade.astype(float)
+
+
+def classificar_regime_lunar(idade_dias: float) -> str:
+    """Classifica como SIZIGIA, QUADRATURA ou INTERMEDIARIO conforme idade lunar."""
+    if pd.isna(idade_dias):
+        return "INTERMEDIARIO"
+    if idade_dias <= 3.0 or idade_dias >= 26.5 or (14.0 <= idade_dias <= 17.0):
+        return "SIZIGIA"
+    if (5.0 <= idade_dias <= 9.0) or (20.0 <= idade_dias <= 24.0):
+        return "QUADRATURA"
+    return "INTERMEDIARIO"
+
+
+def _amp_diaria(df: pd.DataFrame, col_tempo: str, col_val: str) -> pd.DataFrame:
+    """Amplitude diária (max - min) por dia."""
+    df = df.copy()
+    df[col_tempo] = pd.to_datetime(df[col_tempo])
+    df["dia"] = df[col_tempo].dt.floor("D")
+    g = df.groupby("dia")[col_val].agg(["min", "max"]).reset_index()
+    g["amp"] = g["max"] - g["min"]
+    return g[["dia", "amp"]]
+
+
+def _duracao_total(resultado: dict) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], float]:
+    """Retorna (início, fim, duração em dias) da série de poços."""
+    series = resultado.get("series_horarias", {})
+    if not series:
+        return None, None, 0.0
+    inicios = []
+    fins = []
+    for df in series.values():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        col_h = _pick_col(df, ("hora", "datetime", "datahora"))
+        df = _ensure_dt(df, col_h)
+        inicios.append(df[col_h].min())
+        fins.append(df[col_h].max())
+    if not inicios:
+        return None, None, 0.0
+    ini = min(inicios)
+    fim = max(fins)
+    dur_d = float((fim - ini).total_seconds() / 86400.0)
+    return ini, fim, dur_d
+
+
+def analise_pig_quinzenal(resultado: dict) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Análise de modulação quinzenal (sizígia × quadratura).
+
+    Requisitos: presença de maré e série com ≥ 20 dias.
+    Calcula amplitudes diárias por poço, classifica regime lunar (sizígia/quadratura),
+    e agrega métricas (R, lag, RSS espectrais) por poço × regime.
+    """
     df_mare = resultado.get("mare_eventos")
     if not isinstance(df_mare, pd.DataFrame) or df_mare.empty:
         return pd.DataFrame(), pd.DataFrame(), {"status": "SKIP", "motivo": "Sem maré"}
 
-    SINODICO_DIAS = 29.53058867
-    LUA_REF = pd.Timestamp("2000-01-06 18:14:00", tz=None)
+    ini, fim, dur_d = _duracao_total(resultado)
+    if dur_d < 20:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "status": "SKIP",
+            "motivo": f"Período de {dur_d:.1f} dias < 20 dias mínimos"
+        }
 
+    # Amplitude diária da maré
+    col_md = _pick_col(df_mare, ("datetime", "hora", "datahora"))
+    col_m = _pick_col(df_mare, ("maré", "mare", "altura"))
+    df_mare_d = _amp_diaria(_ensure_dt(df_mare, col_md), col_md, col_m)
+
+    # Envelope por poço (amplitude diária do nível)
     series = resultado.get("series_horarias", {})
-    if not series:
-        return pd.DataFrame(), pd.DataFrame(), {"status": "SKIP", "motivo": "Sem séries"}
+    env_rows: List[pd.DataFrame] = []
+    for poco, df_h in series.items():
+        if not isinstance(df_h, pd.DataFrame) or df_h.empty:
+            continue
+        col_h = _pick_col(df_h, ("hora", "datetime", "datahora"))
+        col_n = _pick_col(df_h, ("Nivel", "Nível", "nivel", "level"))
+        df_env = _amp_diaria(_ensure_dt(df_h, col_h), col_h, col_n)
+        if df_env.empty:
+            continue
+        df_env["Poco"] = poco
+        env_rows.append(df_env)
+    if not env_rows:
+        return pd.DataFrame(), pd.DataFrame(), {"status": "SKIP", "motivo": "Sem amplitude diária de poço"}
+    df_env_all = pd.concat(env_rows, ignore_index=True)
 
-    return pd.DataFrame(), pd.DataFrame(), {"status": "OK", "IMQ_médio": 1.0, "%_poços_semidiurna_dom": 50.0}
+    df_env_all = df_env_all.merge(df_mare_d.rename(columns={"amp": "amp_mare"}), on="dia", how="left")
+    df_env_all.rename(columns={"amp": "amp_poco"}, inplace=True)
+
+    # Idade lunar e regime por dia
+    idade = calcular_idade_lunar(df_env_all["dia"])
+    df_env_all["idade_lua_dias"] = idade.values
+    df_env_all["Regime_lunar"] = df_env_all["idade_lua_dias"].apply(classificar_regime_lunar)
+
+    # Tabela PIG por poço e regime
+    df_con = resultado.get("consolidado")
+    pig_rows = []
+    if isinstance(df_con, pd.DataFrame) and not df_con.empty:
+        dfc = df_con.copy()
+        col_poco = "Poço" if "Poço" in dfc.columns else ("Poco" if "Poco" in dfc.columns else None)
+        if not col_poco:
+            col_poco = "Poco"
+            dfc["Poco"] = dfc.get("Poço", "?")
+
+        if "Início" in dfc.columns and "Fim" in dfc.columns:
+            dfc["Início"] = pd.to_datetime(dfc["Início"])
+            dfc["Fim"] = pd.to_datetime(dfc["Fim"])
+            dfc["centro"] = dfc["Início"] + (dfc["Fim"] - dfc["Início"]) / 2
+            dfc["idade_lua_dias"] = calcular_idade_lunar(dfc["centro"]).values
+            dfc["Regime_lunar"] = dfc["idade_lua_dias"].apply(classificar_regime_lunar)
+        else:
+            dfc["centro"] = pd.NaT
+            dfc["idade_lua_dias"] = np.nan
+            dfc["Regime_lunar"] = "INTERMEDIARIO"
+
+        col_amp_p2p = "Amplitude pico-a-pico (m)"
+        col_rms = "Amplitude RMS (m)"
+        col_rss12 = "Amp semidiurna (RSS, ~12h) (m)"
+        col_rss24 = "Amp diurna (RSS, ~24h) (m)"
+        col_lag = "Lag médio total (h)"
+
+        df_mare_dt = _ensure_dt(df_mare, col_md)[[col_md, col_m]].rename(columns={col_md: "t", col_m: "mare"})
+
+        def _amp_mare_na_janela(t0: pd.Timestamp, t1: pd.Timestamp) -> float:
+            seg = df_mare_dt[(df_mare_dt["t"] >= t0) & (df_mare_dt["t"] <= t1)]["mare"].dropna()
+            if seg.empty:
+                return np.nan
+            return float(seg.max() - seg.min())
+
+        for (poco, regime), g in dfc.groupby([col_poco, "Regime_lunar"], dropna=False):
+            if len(g) == 0:
+                continue
+            amp_p2p = float(g[col_amp_p2p].mean()) if col_amp_p2p in g.columns else np.nan
+            rms = float(g[col_rms].mean()) if col_rms in g.columns else np.nan
+            rss12 = float(g[col_rss12].mean()) if col_rss12 in g.columns else np.nan
+            rss24 = float(g[col_rss24].mean()) if col_rss24 in g.columns else np.nan
+            lag_med = float(g[col_lag].mean()) if col_lag in g.columns else np.nan
+
+            r_vals = []
+            if "Início" in g.columns and "Fim" in g.columns and col_amp_p2p in g.columns:
+                for _, row in g.iterrows():
+                    a_poco = row.get(col_amp_p2p, np.nan)
+                    if pd.isna(a_poco):
+                        continue
+                    a_mare = _amp_mare_na_janela(row["Início"], row["Fim"])
+                    if pd.notna(a_mare) and a_mare > 0:
+                        r_vals.append(float(a_poco) / float(a_mare))
+            r_med = float(np.nanmean(r_vals)) if len(r_vals) else np.nan
+
+            inv_pct = np.nan
+            grad = resultado.get("gradiente2d")
+            if isinstance(grad, dict) and grad.get("status") == "OK":
+                df_jg = grad.get("janelas")
+                if isinstance(df_jg, pd.DataFrame) and not df_jg.empty and {"Início", "Fim"}.issubset(df_jg.columns):
+                    jg = df_jg.copy()
+                    jg["Início"] = pd.to_datetime(jg["Início"])
+                    jg["Fim"] = pd.to_datetime(jg["Fim"])
+                    jg["centro"] = jg["Início"] + (jg["Fim"] - jg["Início"]) / 2
+                    jg["idade_lua_dias"] = calcular_idade_lunar(jg["centro"]).values
+                    jg["Regime_lunar"] = jg["idade_lua_dias"].apply(classificar_regime_lunar)
+                    jj = jg[jg["Regime_lunar"] == regime]
+                    if not jj.empty:
+                        inv_cols = [c for c in jj.columns if str(c).startswith("Inversão (")]
+                        if inv_cols:
+                            col_inv = inv_cols[0]
+                            inv_pct = float(100.0 * (jj[col_inv].astype(str).str.upper() == "SIM").mean())
+
+            pig_rows.append({
+                "Poco": poco,
+                "Regime": regime,
+                "Amp_p2p_m": amp_p2p,
+                "RMS_m": rms,
+                "RSS_12h_m": rss12,
+                "RSS_24h_m": rss24,
+                "R_indice": r_med,
+                "Lag_médio_h": lag_med,
+                "Inversão_%": inv_pct,
+            })
+
+    df_pig = pd.DataFrame(pig_rows)
+
+    resumo = {"status": "OK"}
+    if not df_pig.empty:
+        imq_vals = []
+        for poco, g in df_pig.groupby("Poco"):
+            a_s = g.loc[g["Regime"] == "SIZIGIA", "Amp_p2p_m"].mean()
+            a_q = g.loc[g["Regime"] == "QUADRATURA", "Amp_p2p_m"].mean()
+            if pd.notna(a_s) and pd.notna(a_q) and a_q > 0:
+                imq_vals.append(a_s / a_q)
+        resumo["IMQ_médio"] = float(np.nanmean(imq_vals)) if imq_vals else np.nan
+
+        dom_semidiurna = []
+        for poco, g in df_pig.groupby("Poco"):
+            r12 = g["RSS_12h_m"].mean()
+            r24 = g["RSS_24h_m"].mean()
+            if pd.notna(r12) and pd.notna(r24):
+                dom_semidiurna.append(float(r12 > r24))
+        resumo["%_poços_semidiurna_dom"] = float(100.0 * np.mean(dom_semidiurna)) if dom_semidiurna else np.nan
+
+    df_envelope = df_env_all.sort_values(["Poco", "dia"]).reset_index(drop=True)
+    return df_pig, df_envelope, resumo
 
 
 # =============================================================================
@@ -664,6 +912,54 @@ with st.expander("📖 Sobre o Projeto", expanded=False):
     O sistema permite quantificar conectividade hidráulica, resposta do aquífero às variações de maré,
     estabilidade direcional e inversões do fluxo subterrâneo.
     """)
+
+# Download de dados de exemplo para teste
+with st.expander("📦 Baixar dados de exemplo para testar", expanded=False):
+    st.markdown("""
+    Cenário sintético de **4 poços em 30 dias** com modulação quinzenal alinhada ao
+    calendário lunar real. Use estes arquivos para conhecer o app sem precisar de dados próprios.
+
+    **Início recomendado para todos os poços:** `27/05/2025 00:00`
+    """)
+
+    exemplos_dir = Path(__file__).parent / "data" / "exemplos"
+
+    def _download_se_existir(nome_arquivo: str, label: str, mime: str = "text/csv") -> None:
+        caminho = exemplos_dir / nome_arquivo
+        if caminho.exists():
+            with open(caminho, "rb") as f:
+                st.download_button(
+                    label=label,
+                    data=f.read(),
+                    file_name=nome_arquivo,
+                    mime=mime,
+                    key=f"dl_{nome_arquivo}",
+                    use_container_width=True,
+                )
+
+    col_ex1, col_ex2 = st.columns(2)
+
+    with col_ex1:
+        st.markdown("**Poços (formato Levellogger)**")
+        for i in range(1, 5):
+            _download_se_existir(f"PM-EX-0{i}.csv", f"⬇️ PM-EX-0{i}.csv")
+
+    with col_ex2:
+        st.markdown("**Maré e gradiente 2D**")
+        _download_se_existir("mare_tabua.csv", "⬇️ Tábua de maré")
+        _download_se_existir(
+            "cotas.xlsx", "⬇️ Cotas (XLSX)",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        _download_se_existir(
+            "pocos.kmz", "⬇️ Coordenadas (KMZ)",
+            mime="application/vnd.google-earth.kmz",
+        )
+
+    st.caption(
+        "Os dados são fictícios mas reproduzem dinâmica realista de aquífero costeiro. "
+        "Detalhes técnicos do cenário em `data/exemplos/README.md` no repositório."
+    )
 
 st.divider()
 
@@ -791,7 +1087,7 @@ if isinstance(resultado, dict):
                 poco_selecionado = st.multiselect(
                     "Filtrar por poço",
                     pocos_disponiveis,
-                    default=pocos_disponiveis[:1] if poucos_disponiveis else [],
+                    default=pocos_disponiveis[:1] if pocos_disponiveis else [],
                     help="Selecione um ou mais poços"
                 )
 

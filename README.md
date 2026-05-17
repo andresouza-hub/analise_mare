@@ -2,141 +2,123 @@
 
 **Análise de Aquíferos Costeiros com Influência de Maré**
 
-![Streamlit](https://img.shields.io/badge/Streamlit-1.29.0-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-1.36.0-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?style=flat-square&logo=python&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
 ## Descrição
 
-O **GAC Tidal Insight** é uma ferramenta de análise hidrológica para aquíferos costeiros, desenvolvida especificamente para especialistas em Gerenciamento de Áreas Contaminadas (GAC). A aplicação permite:
+O **GAC Tidal Insight** é uma plataforma analítica para avaliação integrada da
+dinâmica hidráulica de aquíferos rasos costeiros, voltada a profissionais de
+Gerenciamento de Áreas Contaminadas (GAC). O sistema permite quantificar
+conectividade hidráulica, resposta do aquífero às variações de maré,
+estabilidade direcional e inversões do fluxo subterrâneo, apoiando interpretações
+hidrogeológicas e a tomada de decisão.
 
-- **Análise de poços de monitoramento** com dados de nível piezométrico
-- **Correlação com dados maregráficos** em tempo real
-- **Cálculo do atraso de maré** (tidal lag) entre o mar e os poços
-- **Análise espectral FFT** para identificação de componentes de maré
-- **Cálculo de gradiente hidráulico 2D** com visualização de mapas
-- **Estimativa de direção de fluxo** subterráneo
+## Funcionalidades
 
-## Metodologia
+- **Método de Serfes (1991)** — estimativa de nível médio com janela móvel de 71 h
+- **Análise espectral (FFT)** — decomposição em bandas semidiurna (~12 h) e diurna (~24 h)
+- **Defasagem maré–poço (lag)** — quantificação da resposta hidráulica
+- **Gradiente hidráulico 2D** — ajuste de plano por mínimos quadrados, direção e módulo
+- **Modulação quinzenal** — análise sizígia × quadratura com Índice IMQ
+- **Interpretação técnica automática** — relatório consolidado por poço
 
-A aplicação implementa metodologias estabelecidas na literatura técnica:
+## Formatos de entrada aceitos
 
-1. **Método Serfes (1991)** - Estimativa de nível médio d'água
-2. **Análise FFT** - Decomposição espectral (semi-diurnal ~12.42h, diurna ~24h)
-3. **Análise de fase/amplitude** - Determinação do tidal lag
-4. **Modulação fortnightly** - Identificação de sizígia vs quadratura
+A aplicação aceita dois formatos para cada tipo de arquivo, com **detecção automática**.
 
-## Instalação
+### Poços (nível d'água)
 
-### Requisitos
+**Formato A — Levellogger (Solinst):**
+Arquivo do datalogger com 11 linhas de metadados (Serial_number, Project ID, etc.)
+seguidas do cabeçalho `Date;Time;ms;LEVEL;TEMPERATURE`. Separador `;`, decimal vírgula,
+encoding latin1.
 
-- Python 3.10+
-- pip ou conda
+**Formato B — CSV simples (recomendado para testes):**
+Cabeçalho `datetime,nivel` na primeira linha, separador `,` (ou `;`), encoding UTF-8.
+Aceita também `data,hora,nivel` ou variações case-insensitive.
 
-### Passos
+### Maré
+
+**Formato A — Tábua da Marinha do Brasil:**
+Cabeçalho `Mês;Dia (num);Dia (semana);Hora;Altura maré;Ano`, separador `;`.
+Cada linha = um evento (preamar ou baixamar).
+
+**Formato B — CSV simples:**
+Cabeçalho `datetime,mare`, série contínua (horária ou outra resolução).
+
+### Gradiente 2D (opcional)
+
+- **Cotas:** XLSX com colunas `Poco;Cota_TOC_m`
+- **Localização:** KMZ com Placemarks/Points nomeados conforme os poços
+
+## Instalação local
 
 ```bash
-# Clonar ou baixar o projeto
 git clone https://github.com/SEU-USUARIO/gac-tidal-insight.git
 cd gac-tidal-insight
-
-# Criar ambiente virtual (recomendado)
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# ou .venv\Scripts\activate  # Windows
-
-# Instalar dependências
+source .venv/bin/activate          # Linux/Mac
+# .venv\Scripts\activate           # Windows
 pip install -r requirements.txt
-
-# Executar
 streamlit run app.py
 ```
 
-## Uso
+## Dados de exemplo
 
-### 1. Upload de Dados
+A pasta `data/exemplos/` contém um cenário sintético completo (4 poços, 30 dias,
+maré com modulação quinzenal alinhada ao calendário lunar real, KMZ e cotas).
+Consulte `data/exemplos/README.md` para a descrição completa do cenário e dos
+resultados esperados.
 
-Carregue os arquivos no formato esperado:
+Para regenerar os exemplos (ou criar variações):
 
-| Tipo | Formato | Colunas |
-|------|---------|---------|
-| **Poços** | CSV | Date, Time, ms, LEVEL, TEMPERATURE |
-| **Maré** | CSV | Mês, Dia (num), Hora, Altura maré, Ano |
-| **Cotas** | XLSX | Poco, Cota_TOC_m |
+```bash
+cd data/exemplos
+python gerar_exemplos.py --dias 30
+```
 
-### 2. Configurações
-
-No painel lateral:
-- Período de referência para maré
-- Intervalo FFT desejado
-- Parâmetros de filtragem
-
-### 3. Resultados
-
-A aplicação gera:
-- **Dashboard** com métricas consolidadas
-- **Análise por poço** com gráficos de nível
-- **Mapa de gradiente 2D** com vetores de fluxo
-- **Relatório em Excel** para download
-
-## Estrutura do Projeto
+## Estrutura do projeto
 
 ```
 gac-tidal-insight/
-├── app.py                    # Interface Streamlit
-├── requirements.txt          # Dependências
+├── app.py                          # Interface Streamlit (entrypoint)
+├── requirements.txt                # Dependências pinadas
+├── README.md
+├── DEPLOY_GUIDE.md                 # Guia de deploy no Streamlit Cloud
 ├── src/
 │   ├── core/
-│   │   ├── orquestrador_b.py  # Orquestrador de análise
-│   │   ├── analise_poco.py    # Análise individual
-│   │   ├── mare_lag.py       # Cálculo de tidal lag
-│   │   ├── serfes.py         # Método Serfes
-│   │   └── gradiente_2d.py   # Gradiente 2D
+│   │   ├── orquestrador_b.py       # Pipeline de execução
+│   │   ├── analise_poco.py         # Análise por poço (Serfes + FFT + lag)
+│   │   ├── mare_lag.py             # Cálculo de defasagem
+│   │   ├── serfes.py               # Método de Serfes (1991)
+│   │   ├── gradiente_2d.py         # Gradiente hidráulico bidimensional
+│   │   ├── analise_gradiente.py    # Janelas e vetores horários
+│   │   ├── amplitudes.py           # Amplitudes p2p e RMS
+│   │   └── lua.py                  # Fases lunares
 │   ├── io/
-│   │   ├── leitura_pocos.py   # Leitura CSV poços
-│   │   ├── leitura_mare.py   # Leitura CSV maré
-│   │   └── leitura_cotas.py  # Leitura XLSX cotas
-│   ├── viz/
-│   │   └── mapas_gradiente.py # Visualizações
-│   └── export/
-│       └── exportador_excel.py # Exportação
+│   │   ├── leitura_pocos.py        # Levellogger + CSV simples
+│   │   ├── leitura_mare.py         # Tábua Marinha + CSV simples
+│   │   ├── leitura_cotas.py        # Excel de cotas
+│   │   └── leitura_kmz.py          # KMZ → coordenadas UTM
+│   └── viz/
+│       └── mapas_gradiente.py      # Mapa do gradiente 2D
 └── data/
-    └── exemplos/            # Arquivos de exemplo
+    └── exemplos/
+        ├── gerar_exemplos.py       # Gerador paramétrico
+        ├── PM-EX-0[1-4].csv        # 4 poços formato Levellogger
+        ├── PM-EX-0[1-4]_simples.csv# Mesmos poços, formato simples
+        ├── mare_tabua.csv          # Maré formato tábua
+        ├── mare_simples.csv        # Maré formato simples
+        ├── pocos.kmz               # Coordenadas
+        ├── cotas.xlsx              # Cotas TOC
+        └── README.md               # Descrição do cenário
 ```
 
-## Dados de Exemplo
+## Deploy no Streamlit Cloud
 
-A pasta `data/exemplos/` contém arquivos de exemplo para teste:
-
-- `poco_exemplo.csv` - 20 dias de dados (30 min interval)
-- `mare_exemplo.csv` - 5 dias de eventos maregráficos
-- `cotas_exemplo.xlsx` - 4 poços com coordenadas
-
-## Deploy
-
-O projeto pode ser implantado no **Streamlit Cloud** gratuitamente:
-
-1. Crie um repositório no GitHub
-2. Faça push do código
-3. Acesse https://share.streamlit.io
-4. Selecione o repositório e faça deploy
-
-Consulte `DEPLOY_GUIDE.md` para instruções detalhadas.
+Consulte `DEPLOY_GUIDE.md` para o passo-a-passo completo.
 
 ## Autor
 
-**André Souza**
-Especialista em Gerenciamento de Áreas Contaminadas (GAC)
-
-## Licença
-
-MIT License - Uso livre para fins educacionais e comerciais.
-
-## Citação
-
-Se você usar esta ferramenta em pesquisa, por favor cite:
-
-```
-Souza, A. (2025). GAC Tidal Insight - Análise de Aquíferos Costeiros.
-https://github.com/SEU-USUARIO/gac-tidal-insight
-```
+**André Souza** — Especialista em Gerenciamento de Áreas Contaminadas (GAC)

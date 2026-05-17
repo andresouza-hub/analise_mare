@@ -15,9 +15,24 @@ def ler_mare_csv_eventos(caminho_csv: str, ano_ref: int | None = None) -> pd.Dat
 
     Observações:
     - Robusto a BOM/acentos quebrados e variações comuns de cabeçalho.
+    - Suporta múltiplos encodings (UTF-8, Latin-1, ISO-8859-1).
     - 'Hora' no formato '%H:%M'.
     """
-    df = pd.read_csv(caminho_csv, sep=';', encoding='latin1')
+    # Tentar múltiplos encodings
+    encodings_to_try = ['utf-8', 'latin1', 'iso-8859-1', 'cp1252']
+    df = None
+    last_error = None
+
+    for encoding in encodings_to_try:
+        try:
+            df = pd.read_csv(caminho_csv, sep=';', encoding=encoding)
+            break  # Sucesso!
+        except (UnicodeDecodeError, pd.errors.ParserError) as e:
+            last_error = e
+            continue
+
+    if df is None:
+        raise ValueError(f"Não foi possível ler o arquivo de maré com nenhum encoding suportado. Último erro: {last_error}")
     # Correções comuns de encoding / BOM
     df = df.rename(columns={
         'ï»¿MÃªs': 'Mês',

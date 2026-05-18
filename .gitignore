@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
 
 .venv/
@@ -10,6 +10,4 @@ temp/
 
 .DS_Store
 
-# Ignora apenas dados brutos/temporários (podem ser confidenciais),
-# mas mantém os exemplos sinteticos versionados
-data/tmp/
+data/

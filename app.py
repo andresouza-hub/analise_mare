@@ -53,6 +53,49 @@ def base_nome(uploaded_file) -> str:
     return Path(uploaded_file.name).stem.strip()
 
 
+@st.cache_data(show_spinner=False)
+def detectar_primeiro_timestamp(file_bytes: bytes, file_name: str) -> Optional[str]:
+    """Faz peek rápido no arquivo enviado e retorna o primeiro timestamp encontrado.
+
+    Aceita tanto o formato Levellogger (com 11 linhas de cabeçalho) quanto o CSV
+    simples (datetime na primeira coluna). Retorna string 'dd/mm/yyyy HH:MM' ou None.
+    """
+    try:
+        texto = None
+        for enc in ("utf-8", "latin1", "iso-8859-1", "cp1252"):
+            try:
+                texto = file_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if texto is None:
+            return None
+
+        linhas = texto.split("\n")[:30]
+        eh_levellogger = any(
+            ("serial_number" in l.lower()) or ("project id" in l.lower())
+            for l in linhas[:11]
+        )
+
+        candidatos = linhas[12:20] if eh_levellogger else linhas[1:10]
+        for linha in candidatos:
+            partes = [p.strip() for p in linha.replace("\t", ";").replace(",", ";").split(";") if p.strip()]
+            if not partes:
+                continue
+            # Tenta primeiro a combinação data+hora; só depois a primeira coluna isolada
+            tentativas = []
+            if len(partes) >= 2:
+                tentativas.append(f"{partes[0]} {partes[1]}")
+            tentativas.append(partes[0])
+            for cand in tentativas:
+                dt = pd.to_datetime(cand, dayfirst=True, errors="coerce")
+                if pd.notna(dt):
+                    return dt.strftime("%d/%m/%Y %H:%M")
+        return None
+    except Exception:
+        return None
+
+
 def _cardinal_16(angle_deg: float) -> str:
     """Converte ângulo para direção cardinal."""
     dirs = [
@@ -219,13 +262,18 @@ with st.sidebar:
     with st.expander("⏰ 2. Data/Hora de Início", expanded=True):
         inicios_por_poco: Dict[str, pd.Timestamp] = {}
         if pocos_files:
+            st.caption("💡 A data é detectada automaticamente do arquivo. Ajuste se necessário.")
             for f in pocos_files:
                 poco = base_nome(f)
+                # Auto-sugere data com base no primeiro registro do arquivo
+                sugestao = detectar_primeiro_timestamp(f.getvalue(), f.name) or "01/01/2026 00:00"
+                # Key inclui tamanho do arquivo para forçar reset quando trocar de arquivo
+                key_inp = f"inicio_{poco}_{f.size}"
                 inicio_txt = st.text_input(
                     f"Início – {poco}",
-                    value="01/01/2026 00:00",
-                    key=f"inicio_{poco}",
-                    help="Data no formato dd/mm/aaaa hh:mm"
+                    value=sugestao,
+                    key=key_inp,
+                    help="Formato: dd/mm/aaaa hh:mm. Pré-preenchido com a primeira data do arquivo.",
                 )
                 try:
                     inicios_por_poco[poco] = pd.to_datetime(inicio_txt, dayfirst=True)
@@ -378,7 +426,7 @@ def plot_violin_box(df, col_nivel, titulo):
 
 
 def plot_gradiente_mapa(df_xy: pd.DataFrame, angulo: float, titulo: str):
-    """Mapa de gradiente com seta direcional."""
+    """Mapa de gradiente com seta direcional e rosa dos ventos."""
     fig, ax = plt.subplots(figsize=FIG_MAP)
     fig.set_dpi(120)
 
@@ -411,20 +459,147 @@ def plot_gradiente_mapa(df_xy: pd.DataFrame, angulo: float, titulo: str):
 
     ax.set_aspect("equal", adjustable="box")
     ax.set_title(titulo, fontsize=11, fontweight='bold')
-    ax.set_xlabel("X (m)", fontsize=10)
-    ax.set_ylabel("Y (m)", fontsize=10)
+    ax.set_xlabel("X (m) [UTM]", fontsize=10)
+    ax.set_ylabel("Y (m) [UTM]", fontsize=10)
     ax.tick_params(labelsize=9)
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
     ax.set_facecolor('#f8f9fa')
 
-    # Adicionar bússola
-    circle = plt.Circle((0.95, 0.95), 0.08, transform=ax.transAxes,
-                        facecolor='white', edgecolor='#333', zorder=10)
+    # Rosa dos ventos no canto superior direito (em coordenadas relativas)
+    # Em UTM, Y aponta para o norte (eixo cartesiano vertical)
+    rose_cx, rose_cy = 0.93, 0.93   # centro
+    rose_r = 0.06                    # raio
+    # Círculo de fundo
+    circle = plt.Circle((rose_cx, rose_cy), rose_r, transform=ax.transAxes,
+                        facecolor='white', edgecolor='#666', linewidth=1.2, zorder=10)
     ax.add_patch(circle)
-    ax.text(0.95, 0.95, 'N', transform=ax.transAxes, ha='center', va='center', fontsize=8, fontweight='bold')
+    # Seta apontando para o norte (cima)
+    ax.annotate('', xy=(rose_cx, rose_cy + rose_r * 0.85),
+                xytext=(rose_cx, rose_cy - rose_r * 0.55),
+                xycoords='axes fraction',
+                arrowprops=dict(arrowstyle='->', color='#E53935', lw=1.5),
+                zorder=11)
+    # Rótulos N, S, L, O
+    offset = rose_r + 0.012
+    ax.text(rose_cx, rose_cy + offset, 'N', transform=ax.transAxes,
+            ha='center', va='bottom', fontsize=9, fontweight='bold', color='#E53935', zorder=12)
+    ax.text(rose_cx, rose_cy - offset, 'S', transform=ax.transAxes,
+            ha='center', va='top', fontsize=8, color='#666', zorder=12)
+    ax.text(rose_cx + offset, rose_cy, 'L', transform=ax.transAxes,
+            ha='left', va='center', fontsize=8, color='#666', zorder=12)
+    ax.text(rose_cx - offset, rose_cy, 'O', transform=ax.transAxes,
+            ha='right', va='center', fontsize=8, color='#666', zorder=12)
 
     fig.tight_layout()
     return fig
+
+
+def plot_gradiente_mapa_folium(df_xy: pd.DataFrame, angulo: float):
+    """Mapa interativo com basemap de satélite (ESRI World Imagery), poços e vetor de fluxo.
+
+    Requer colunas 'lon' e 'lat' em df_xy (devolvidas pelo leitor de KMZ).
+    Retorna o objeto folium.Map ou None se folium não estiver instalado/colunas ausentes.
+    """
+    if "lon" not in df_xy.columns or "lat" not in df_xy.columns:
+        return None
+    try:
+        import folium
+    except ImportError:
+        return None
+
+    lat_c = float(df_xy["lat"].mean())
+    lon_c = float(df_xy["lon"].mean())
+
+    # Mapa base com camada de satélite ESRI (gratuita, sem API key)
+    m = folium.Map(location=[lat_c, lon_c], zoom_start=18, tiles=None, control_scale=True)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles © Esri — World Imagery",
+        name="Satélite (ESRI)",
+        max_zoom=20,
+    ).add_to(m)
+    folium.TileLayer("OpenStreetMap", name="Ruas (OSM)").add_to(m)
+
+    # Marcadores dos poços
+    for _, r in df_xy.iterrows():
+        folium.CircleMarker(
+            location=[float(r["lat"]), float(r["lon"])],
+            radius=7,
+            color="#1E88E5",
+            weight=2,
+            fill=True,
+            fill_color="#1E88E5",
+            fill_opacity=0.9,
+            popup=folium.Popup(
+                f"<b>{r['Poco']}</b><br>"
+                f"Lat: {r['lat']:.5f}<br>"
+                f"Lon: {r['lon']:.5f}<br>"
+                f"X: {r.get('X_m', float('nan')):.1f} m<br>"
+                f"Y: {r.get('Y_m', float('nan')):.1f} m",
+                max_width=220,
+            ),
+            tooltip=str(r["Poco"]),
+        ).add_to(m)
+        folium.Marker(
+            location=[float(r["lat"]), float(r["lon"])],
+            icon=folium.DivIcon(html=(
+                f'<div style="font-size:11px;font-weight:600;color:#fff;'
+                f'background:rgba(30,136,229,0.85);padding:2px 5px;border-radius:3px;'
+                f'white-space:nowrap;transform:translate(8px,-22px);">{r["Poco"]}</div>'
+            )),
+        ).add_to(m)
+
+    # Seta do vetor de fluxo (do centroide, na direção `angulo`)
+    # Tamanho da seta = ~40% do span dos poços
+    lat_span = float(df_xy["lat"].max() - df_xy["lat"].min())
+    lon_span = float(df_xy["lon"].max() - df_xy["lon"].min())
+    span = max(lat_span, lon_span)
+    if span <= 0:
+        span = 0.0005
+    L = 0.6 * span
+
+    # Em UTM o ângulo é medido a partir do eixo X (leste) no sentido anti-horário.
+    # Para o mapa lat/lon, dx vira deslocamento em lon, dy em lat.
+    # Ajuste de escala porque 1° lat ≈ 1° lon × cos(lat).
+    rad = np.deg2rad(angulo)
+    dlat = L * np.sin(rad)
+    dlon = (L * np.cos(rad)) / max(np.cos(np.deg2rad(lat_c)), 0.001)
+
+    seta_origem = [lat_c, lon_c]
+    seta_destino = [lat_c + dlat, lon_c + dlon]
+
+    folium.PolyLine(
+        [seta_origem, seta_destino],
+        color="#E53935",
+        weight=4,
+        opacity=0.95,
+    ).add_to(m)
+    # "Cabeça" da seta como marcador triangular
+    folium.RegularPolygonMarker(
+        location=seta_destino,
+        number_of_sides=3,
+        rotation=float(90 - angulo),
+        radius=8,
+        color="#E53935",
+        fill=True,
+        fill_color="#E53935",
+        fill_opacity=1.0,
+    ).add_to(m)
+
+    # Rosa dos ventos no canto (HTML overlay)
+    rosa_html = """
+    <div style="position:fixed;top:60px;right:14px;z-index:9999;
+                background:#fff;padding:8px 10px;border-radius:50%;
+                box-shadow:0 1px 4px rgba(0,0,0,0.3);width:64px;height:64px;
+                text-align:center;font-family:sans-serif;">
+        <div style="font-size:18px;color:#E53935;font-weight:bold;line-height:1;">↑</div>
+        <div style="font-size:11px;color:#E53935;font-weight:bold;margin-top:-2px;">N</div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(rosa_html))
+
+    folium.LayerControl(position="topleft", collapsed=True).add_to(m)
+    return m
 
 
 def plot_gradiente_series(df_v: pd.DataFrame):
@@ -1026,27 +1201,83 @@ if isinstance(resultado, dict):
     # Dashboard de Métricas
     st.markdown("### 📊 Dashboard de Métricas")
 
+    def _card_metric(titulo: str, valor: str, cor: str = "#1E88E5", legenda: str = "") -> str:
+        """Card de métrica com tipografia compacta (evita texto cortado)."""
+        leg_html = (
+            f'<div style="color:#999;font-size:11px;margin-top:4px;">{legenda}</div>'
+            if legenda else ''
+        )
+        return f"""
+        <div style="
+            background:#fff;
+            padding:14px 16px;
+            border-radius:10px;
+            box-shadow:0 1px 3px rgba(0,0,0,0.06);
+            border-left:3px solid {cor};
+            min-height:78px;
+        ">
+            <div style="color:#666;font-size:12px;margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px;">{titulo}</div>
+            <div style="color:#222;font-size:20px;font-weight:600;line-height:1.2;">{valor}</div>
+            {leg_html}
+        </div>
+        """
+
     metrics_col1, metrics_col2, metrics_col3, metrics_col4 = st.columns(4)
 
     with metrics_col1:
-        st.metric(
-            "Poços Processados",
-            meta.get('processados', 0),
-            meta.get('pulados', 0),
-            delta_color="inverse"
-        )
+        n_proc = meta.get('processados', 0)
+        n_pul = meta.get('pulados', 0)
+        cor_proc = "#43A047" if n_proc > 0 else "#E53935"
+        leg = f"{n_pul} pulado(s)" if n_pul > 0 else "todos OK"
+        st.markdown(_card_metric("Poços Processados", str(n_proc), cor_proc, leg), unsafe_allow_html=True)
 
     with metrics_col2:
-        status_mare = "✅ Com maré" if meta.get('tem_mare') else "❌ Sem maré"
-        st.metric("Dados de Maré", status_mare)
+        tem_mare = meta.get('tem_mare', False)
+        valor_mare = "✅ Sim" if tem_mare else "❌ Não"
+        cor_mare = "#43A047" if tem_mare else "#999"
+        st.markdown(_card_metric("Dados de Maré", valor_mare, cor_mare), unsafe_allow_html=True)
 
     with metrics_col3:
-        status_grad = "✅ Calculado" if meta.get('gradiente2d_calculado') else "—"
-        st.metric("Gradiente 2D", status_grad)
+        grad_calc = meta.get('gradiente2d_calculado', False)
+        valor_grad = "✅ Sim" if grad_calc else "—"
+        cor_grad = "#43A047" if grad_calc else "#999"
+        st.markdown(_card_metric("Gradiente 2D", valor_grad, cor_grad), unsafe_allow_html=True)
 
     with metrics_col4:
         status_pig = pig_resumo.get('status', 'N/A')
-        st.metric("Análise PIG", status_pig)
+        valor_pig = "✅ OK" if status_pig == "OK" else ("⏭️ SKIP" if status_pig == "SKIP" else status_pig)
+        cor_pig = "#43A047" if status_pig == "OK" else "#FB8C00"
+        motivo = pig_resumo.get('motivo', '') if status_pig == "SKIP" else ''
+        st.markdown(_card_metric("Análise PIG", valor_pig, cor_pig, motivo[:40]), unsafe_allow_html=True)
+
+    # Aviso visível quando há poços pulados — mostra os motivos
+    if meta.get('pulados', 0) > 0:
+        motivos = meta.get('motivos_pulados', {})
+        if motivos:
+            with st.container():
+                lista_html = "".join(
+                    f"<li><strong>{k}</strong>: {v}</li>" for k, v in motivos.items()
+                )
+                st.markdown(f"""
+                <div style="
+                    background:#FFEBEE;
+                    border-left:4px solid #E53935;
+                    padding:12px 16px;
+                    border-radius:6px;
+                    margin:12px 0;
+                ">
+                    <div style="color:#C62828;font-weight:600;margin-bottom:6px;">
+                        ⚠️ {meta.get('pulados', 0)} poço(s) foram pulados na análise
+                    </div>
+                    <ul style="color:#555;font-size:13px;margin:0 0 0 18px;padding:0;">
+                        {lista_html}
+                    </ul>
+                    <div style="color:#777;font-size:12px;margin-top:8px;">
+                        Causa comum: data/hora de início posterior ao período dos dados.
+                        Confira na seção <strong>"⏰ 2. Data/Hora de Início"</strong>.
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
     st.divider()
 
@@ -1212,13 +1443,41 @@ if isinstance(resultado, dict):
                 """, unsafe_allow_html=True)
 
             if isinstance(df_xy, pd.DataFrame) and not df_xy.empty and ang is not None:
-                st.markdown("### 🗺️ Mapa de Gradiente")
-                fig_map = plot_gradiente_mapa(
-                    df_xy,
-                    ang,
-                    f"Gradiente Hidráulico Dominante – {ang:.1f}°"
-                )
-                st.pyplot(fig_map, use_container_width=True)
+                # Duas visualizações lado a lado: mapa cartesiano (matplotlib) + mapa de satélite (folium)
+                map_tab1, map_tab2 = st.tabs(["🛰️ Mapa de satélite", "📐 Mapa cartesiano"])
+
+                with map_tab1:
+                    if "lon" not in df_xy.columns or "lat" not in df_xy.columns:
+                        st.info(
+                            "Mapa de satélite indisponível: o KMZ deste projeto foi processado por uma "
+                            "versão anterior que não preservava lon/lat. Reenvie o KMZ para ativar."
+                        )
+                    else:
+                        try:
+                            from streamlit_folium import st_folium
+                            mapa_folium = plot_gradiente_mapa_folium(df_xy, ang)
+                            if mapa_folium is not None:
+                                st.caption(
+                                    "Mapa com camada de satélite (ESRI). Use o controle no canto "
+                                    "superior esquerdo para alternar entre satélite e ruas. "
+                                    "Clique nos poços para ver coordenadas."
+                                )
+                                st_folium(mapa_folium, width=None, height=520, returned_objects=[])
+                            else:
+                                st.warning("Não foi possível gerar o mapa de satélite.")
+                        except ImportError:
+                            st.info(
+                                "Para habilitar o mapa de satélite, instale `streamlit-folium` no "
+                                "ambiente. O mapa cartesiano abaixo continua disponível."
+                            )
+
+                with map_tab2:
+                    fig_map = plot_gradiente_mapa(
+                        df_xy,
+                        ang,
+                        f"Gradiente Hidráulico Dominante – {ang:.1f}°"
+                    )
+                    st.pyplot(fig_map, use_container_width=True)
 
             with st.expander("📖 Metodologia – Gradiente Hidráulico 2D"):
                 st.markdown("""

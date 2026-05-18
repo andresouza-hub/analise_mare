@@ -96,15 +96,16 @@ def _converter_lonlat_para_utm(df: pd.DataFrame) -> pd.DataFrame:
     out['X_m'] = x
     out['Y_m'] = y
 
-    return out[['Poco', 'X_m', 'Y_m']]
+    # Mantém lon/lat para uso em mapas com basemap (folium, contextily, etc.)
+    return out[['Poco', 'X_m', 'Y_m', 'lon', 'lat']]
 
 
 def ler_kmz_pocos(caminho_kmz: str) -> pd.DataFrame:
     """
     Lê arquivo KMZ e retorna DataFrame com:
       - Poco
-      - X_m
-      - Y_m
+      - X_m, Y_m (UTM, para gradiente)
+      - lon, lat (WGS84, para mapas com basemap)
     """
     kml_bytes = _extrair_kml_do_kmz(caminho_kmz)
     df_lonlat = _parse_kml_pocos(kml_bytes)

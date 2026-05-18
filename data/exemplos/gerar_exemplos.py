@@ -41,21 +41,22 @@ import pandas as pd
 # =============================================================================
 # Configuração do cenário (cliente fictício "Terminal Aquaviário Beta")
 # =============================================================================
-# Data de início alinhada à lua nova de 27/05/2025 (idade lunar ≈ 0).
-# Isso garante que o batimento das componentes M2/S2 coincida com o calendário lunar:
-# sizígia da maré = sizígia astronômica → IMQ > 1 conforme esperado.
+# =============================================================================
+# Configuração do cenário (cliente fictício "Terminal Aquaviário Beta")
+# =============================================================================
 DATA_INICIO = datetime(2025, 5, 27, 0, 0, 0)
 N_DIAS = 30                                    # duração total
 DT_AMOSTRA_MIN = 30                            # passo de amostragem (min)
 
-# Cenário geográfico fictício (zona costeira hipotética)
-# Coordenadas em torno de Madre de Deus/BA mas deslocadas e renomeadas
+# Cenário geográfico fictício: zona costeira urbana em Vitória/ES,
+# próximo à Praia de Camburi (orientação leste-oeste, mar ao norte, continente ao sul).
+# Transeto perpendicular à linha de costa, deslocado de qualquer instalação real.
 POCOS = [
     # (nome, lon, lat, cota_TOC_m, dist_costa_m, perfil)
-    ("PM-EX-01", -38.6201, -12.7398, 4.85, 30,   "forte"),
-    ("PM-EX-02", -38.6195, -12.7392, 5.42, 90,   "moderada"),
-    ("PM-EX-03", -38.6189, -12.7386, 6.18, 180,  "fraca"),
-    ("PM-EX-04", -38.6183, -12.7380, 7.95, 320,  "confinado"),
+    ("PM-EX-01", -40.2820, -20.2840, 4.85, 30,   "forte"),
+    ("PM-EX-02", -40.2820, -20.2848, 5.42, 90,   "moderada"),
+    ("PM-EX-03", -40.2820, -20.2856, 6.18, 180,  "fraca"),
+    ("PM-EX-04", -40.2820, -20.2869, 7.95, 320,  "confinado"),
 ]
 
 # Parâmetros hidráulicos por perfil de resposta
